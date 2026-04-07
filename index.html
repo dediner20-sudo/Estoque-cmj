@@ -857,28 +857,43 @@ function updCfg(){
 updCfg();
 
 // ══════════════════════════════════════════════════
-// GOOGLE DRIVE SYNC
+// GOOGLE DRIVE SYNC v2 — arquivo por arquivo
 // ══════════════════════════════════════════════════
-// Cole aqui a URL gerada após implantar o Apps Script:
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzPuLTnqJZstUrzq6tNqSHTyiX6l9__gV8DI-Ly8KM4amMchcr2FFg1oy2VvLT5w4UW/exec';
 
 async function syncDrive(){
-  if(!SCRIPT_URL || SCRIPT_URL.includes('COLE_AQUI')){
-    toast('Configure a URL do Apps Script no código (SCRIPT_URL)','err');
-    return;
-  }
   const btn=document.getElementById('btn-sync');
   btn.disabled=true; btn.textContent='⏳ Sincronizando...';
-  setSyncStatus('Buscando dados do Drive...');
+  setSyncStatus('Iniciando...');
+  // Limpa tudo
+  DS.est=null;DS.estFiles=[];DS.vnd=null;DS.prc=null;DS.ofr=null;DS.ofrFiles=[];
 
   const tipos=['est','vnd','prc','ofr'];
-  let erros=[];
+  const erros=[];
 
   for(const tipo of tipos){
     try{
-      setUpSt(tipo,'ld','Buscando...');
-      const dados=await fetchDrive(tipo);
-      await processarDrive(tipo,dados);
+      setUpSt(tipo,'ld','Listando...');
+      setSyncStatus('Listando '+tipo.toUpperCase()+'...');
+      const lista=await jsonpFetch({acao:'listar',tipo});
+      if(!lista.ok) throw new Error(lista.error||'Erro ao listar');
+      const arquivos=lista.arquivos||[];
+      if(!arquivos.length){setUpSt(tipo,'','Pasta vazia');continue;}
+      setUpSt(tipo,'ld',arquivos.length+' arquivo(s)...');
+      let totalLinhas=0;
+      for(let i=0;i<arquivos.length;i++){
+        const arq=arquivos[i];
+        setSyncStatus(`${tipo.toUpperCase()} · ${i+1}/${arquivos.length}: ${arq.nome}`);
+        setUpSt(tipo,'ld',`${i+1}/${arquivos.length}: ${arq.nome}`);
+        try{
+          const res=await jsonpFetch({acao:'ler',fileId:arq.id});
+          if(!res.ok) throw new Error(res.error);
+          const rows=res.dados||[];
+          totalLinhas+=rows.length;
+          acumularDados(tipo,{nome:arq.nome,modificado:arq.modificado,dados:rows});
+        }catch(e){ erros.push(`${tipo}/${arq.nome}: ${e.message}`); }
+      }
+      finalizarTipo(tipo,totalLinhas,arquivos.length);
     }catch(e){
       setUpSt(tipo,'','Erro: '+e.message);
       erros.push(tipo+': '+e.message);
@@ -887,7 +902,7 @@ async function syncDrive(){
 
   btn.disabled=false; btn.textContent='☁ Sincronizar com Drive';
   if(erros.length){
-    setSyncStatus('⚠ Erros: '+erros.join(' | '));
+    setSyncStatus('⚠ Concluído com erros');
     toast('Sincronização com erros','err');
   }else{
     setSyncStatus('✓ Sincronizado em '+new Date().toLocaleTimeString('pt-BR'));
@@ -895,72 +910,49 @@ async function syncDrive(){
   }
 }
 
-function fetchDrive(tipo){
+function jsonpFetch(params){
   return new Promise((res,rej)=>{
-    const cb='cb_'+tipo+'_'+Date.now();
+    const cb='cb_'+Date.now()+'_'+Math.random().toString(36).slice(2);
     const script=document.createElement('script');
-    const timeout=setTimeout(()=>{
-      delete window[cb];
-      script.remove();
-      rej(new Error('Timeout ao buscar '+tipo));
-    },60000);
+    const timeout=setTimeout(()=>{delete window[cb];script.remove();rej(new Error('Timeout'));},90000);
     window[cb]=function(data){
-      clearTimeout(timeout);
-      delete window[cb];
-      script.remove();
-      if(!data.ok) rej(new Error(data.error||'Erro desconhecido'));
-      else res(data);
+      clearTimeout(timeout);delete window[cb];script.remove();
+      if(!data.ok)rej(new Error(data.error||'Erro'));else res(data);
     };
-    script.src=SCRIPT_URL+'?tipo='+tipo+'&callback='+cb;
+    const qs=Object.entries({...params,callback:cb}).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&');
+    script.src=SCRIPT_URL+'?'+qs;
     document.head.appendChild(script);
   });
 }
 
-async function processarDrive(tipo, data){
-  const arquivos=data.arquivos||[];
-  if(!arquivos.length){ setUpSt(tipo,'','Pasta vazia'); return; }
-
+function acumularDados(tipo,arq){
+  const rows=arq.dados||[];
+  if(!rows.length)return;
   if(tipo==='est'){
-    DS.est=null; DS.estFiles=[];
-    for(const arq of arquivos){
-      if(arq.erro||!arq.dados?.length) continue;
-      const rows=arq.dados;
-      const src=inferEstoqueSourceMeta(arq.nome, rows);
-      const stamped=rows.map(r=>({...r,__est_file:arq.nome,__est_source_key:src.key,__est_source_label:src.label}));
-      DS.est=(DS.est||[]).concat(stamped);
-      DS.estFiles.push({name:arq.nome,rows:stamped.length,sourceKey:src.key,sourceLabel:src.label});
-    }
+    const src=inferEstoqueSourceMeta(arq.nome,rows);
+    const stamped=rows.map(r=>({...r,__est_file:arq.nome,__est_source_key:src.key,__est_source_label:src.label}));
+    DS.est=(DS.est||[]).concat(stamped);
+    DS.estFiles.push({name:arq.nome,rows:stamped.length,sourceKey:src.key,sourceLabel:src.label});
     renderEsts();
-    document.getElementById('btn-run').disabled=!DS.est?.length;
-    setUpSt(tipo,'ok',DS.estFiles.length+' arq. · '+(DS.est?.length||0)+' linhas');
-
+    document.getElementById('btn-run').disabled=false;
   }else if(tipo==='vnd'){
-    DS.vnd=null;
-    for(const arq of arquivos){
-      if(arq.erro||!arq.dados?.length) continue;
-      DS.vnd=(DS.vnd||[]).concat(arq.dados);
-    }
-    setUpSt(tipo,'ok',(DS.vnd?.length||0)+' linhas');
-
+    DS.vnd=(DS.vnd||[]).concat(rows);
   }else if(tipo==='prc'){
-    DS.prc=null;
-    for(const arq of arquivos){
-      if(arq.erro||!arq.dados?.length) continue;
-      DS.prc=(DS.prc||[]).concat(arq.dados);
-    }
-    setUpSt(tipo,'ok',(DS.prc?.length||0)+' linhas');
-
+    DS.prc=(DS.prc||[]).concat(rows);
   }else if(tipo==='ofr'){
-    DS.ofr=null; DS.ofrFiles=[];
-    for(const arq of arquivos){
-      if(arq.erro||!arq.dados?.length) continue;
-      // Simula objeto File para inferMonthMeta
-      const fakeFile={name:arq.nome,lastModified:new Date(arq.modificado).getTime()};
-      const meta=inferMonthMeta(fakeFile);
-      const stamped=arq.dados.map(r=>({...r,__ofr_file:arq.nome,__ofr_mes:meta.key,__ofr_mes_label:meta.label,__ofr_ord:meta.ord,__ofr_source:meta.source}));
-      DS.ofr=(DS.ofr||[]).concat(stamped);
-      DS.ofrFiles.push({name:arq.nome,rows:stamped.length,month:meta.key,label:meta.label,ord:meta.ord,source:meta.source});
-    }
+    const fakeFile={name:arq.nome,lastModified:new Date(arq.modificado||Date.now()).getTime()};
+    const meta=inferMonthMeta(fakeFile);
+    const stamped=rows.map(r=>({...r,__ofr_file:arq.nome,__ofr_mes:meta.key,__ofr_mes_label:meta.label,__ofr_ord:meta.ord,__ofr_source:meta.source}));
+    DS.ofr=(DS.ofr||[]).concat(stamped);
+    DS.ofrFiles.push({name:arq.nome,rows:stamped.length,month:meta.key,label:meta.label,ord:meta.ord,source:meta.source});
+  }
+}
+
+function finalizarTipo(tipo,totalLinhas,totalArqs){
+  if(tipo==='est') setUpSt(tipo,'ok',DS.estFiles.length+' arq. · '+(DS.est?.length||0)+' linhas');
+  else if(tipo==='vnd') setUpSt(tipo,'ok',totalArqs+' arq. · '+(DS.vnd?.length||0)+' linhas');
+  else if(tipo==='prc') setUpSt(tipo,'ok',totalArqs+' arq. · '+(DS.prc?.length||0)+' linhas');
+  else if(tipo==='ofr'){
     const meses=[...new Set(DS.ofrFiles.map(x=>x.label))].filter(Boolean).length;
     setUpSt(tipo,'ok',DS.ofrFiles.length+' arq. · '+(DS.ofr?.length||0)+' linhas · '+meses+' mês(es)');
   }
@@ -968,7 +960,7 @@ async function processarDrive(tipo, data){
 
 function setSyncStatus(msg){
   const el=document.getElementById('sync-status');
-  if(el) el.textContent=msg;
+  if(el)el.textContent=msg;
 }
 
 
