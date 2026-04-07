@@ -1439,7 +1439,54 @@ function rodar(){
           obs_base:obsBase,obs_bloq_compra:obsBloqCompra};
       });
 
-      FILT.est=[...TAB.est];
+      // ── SKUs órfãos: têm venda mas não existem no estoque ─────
+      const skusNoEstoque=new Set(TAB.est.map(r=>r.sku));
+      const pIdx2=pIdx; const oIdx2=oIdx;
+      vIdx.forEach((vk,sku)=>{
+        if(skusNoEstoque.has(sku)) return; // já existe no estoque
+        const mesesMovHist=countMovMonths(vk.demMesTodos);
+        if(!mesesMovHist) return; // sem histórico real de vendas
+        const histRef=calcCurvaHistoricaRef(vk.demMesTodos,cfg.mesesAnalise);
+        const demRealHist=calcDemReal(vk.demMesTodos);
+        const faixaEst=calcFaixasEstoque(demRealHist,cfg,histRef.curva||'N');
+        const pfab=pIdx2.get(sku)||null;
+        const oferta=oIdx2.get(sku)||null;
+        // Tenta recuperar descrição e marca do histórico de vendas
+        let desc='', marca='';
+        if(DS.vnd){
+          const vrow=DS.vnd.find(v=>normSku(v.NFItem_ProdutoRef||v.CodigoReferenciaProduto||v.DESENHO||'')===sku);
+          if(vrow){
+            desc=String(vrow.Produto_Descricao||vrow.NFItem_ProdutoDescricao||'').trim();
+            marca=String(vrow.Marca_Descricao||'').trim();
+          }
+        }
+        const sugCmp=Math.max(1,Math.round(faixaEst.estIdeal*10)/10);
+        TAB.est.push({
+          sku, descricao:desc||sku, marca,
+          estoque_nome:'', estoque_origem:'', estoque_cod:'',
+          estq:0, custo_at:0,
+          preco_fab:pfab, oferta, oferta_preco:oferta?.preco_promo||null,
+          dem_mes:vk.demMes, dem_mes_todos:vk.demMesTodos, custo_avg:vk.custoAvg,
+          total_pd:vk.totVnd, meses_mov:countMovMonths(vk.demMes), meses_mov_hist:mesesMovHist,
+          score_pts:histRef.score, curva:histRef.curva||'N', curva_sug:histRef.curva||'N',
+          curva_hist_ref:histRef.curva, score_hist_ref:histRef.score,
+          dem_real:0, dem_real_hist:Math.round(demRealHist*100)/100,
+          teve_historico:true, retomada_historica:true,
+          est_min:faixaEst.estMin, est_ideal:faixaEst.estIdeal, est_max:faixaEst.estMax, est_alvo:faixaEst.estIdeal,
+          sug_cmp:sugCmp, excedente:0, cobertura:null,
+          status_estoque:'RETOMAR',
+          compra_rec:false, tem_rec:mesesMovHist>=3, alerta:null, obsoleto:false,
+          dias_mov:null, is_novo:false,
+          curva_base:vk.hasEmpMatch?'empresa':'todas_empresas',
+          emp_codes:[...(vk.empCods||[])].join(', '),
+          ult_cmp:null,ult_cmp_ts:0,ult_cmp_dias:null,
+          ult_sai:null,ult_sai_ts:0,ult_sai_dias:null,
+          ult_mov:null,ult_mov_ts:0,ult_mov_dias:null,
+          obs_base:null, obs_bloq_compra:false,
+          _orfao:true // marcador interno
+        });
+      });
+      // ─────────────────────────────────────────────────────────
       renderTbl('est');
       updateStats(TAB.est);
       document.getElementById('sbar').classList.remove('hidden');
@@ -1678,6 +1725,7 @@ function stH(r){
   else if(r.status_estoque==='SEM_GIRO')h+=`<span class="bdg br">sem giro</span> `;
   else if(r.status_estoque==='SEM_DEMANDA')h+=`<span class="bdg bgr">sem demanda</span> `;
   else h+=`<span class="bdg bg">ok</span> `;
+  if(r._orfao)h+=`<span class="bdg bo" title="Item zerado — existe no histórico de vendas mas não está no estoque atual">⚠ fora do estoque</span> `;
   if(r.obsoleto)h+=`<span class="bdg br">obsoleto</span> `;
   if(r.is_novo)h+=`<span class="bdg bb">novo</span> `;
   if(r.alerta==='SEM_MOVIMENTO')h+=`<span class="bdg bo" title="Compra recente sem saída">⚠ s/mov</span> `;
@@ -1722,7 +1770,7 @@ function renderTbl(tab){
       let situH=`<span class="bdg bg">ok</span>`;
       let rowClass='';
       if(r.status_estoque==='COMPRAR'){situH=`<span class="bdg bb">📉 comprar ${fmt(r.sug_cmp,1)} un.</span>`;rowClass='cmp';}
-      else if(r.status_estoque==='RETOMAR'){situH=`<span class="bdg bb">🔁 retomar ${fmt(r.sug_cmp,1)} un.</span>`;rowClass='cmp';}
+      else if(r.status_estoque==='RETOMAR'){situH=`<span class="bdg bb">🔁 retomar ${fmt(r.sug_cmp,1)} un.</span>${r._orfao?` <span class="bdg bo" title="Item zerado — não está no estoque atual">⚠ fora do estoque</span>`:''}`;rowClass='cmp';}
       else if(r.status_estoque==='REPOR'){situH=`<span class="bdg by">🟡 abaixo do ideal</span>`;rowClass='alr';}
       else if(r.status_estoque==='PLANEJADO'){situH=`<span class="bdg bgr">📦 acima do ideal</span>`;rowClass='';}
       else if(r.status_estoque==='SEM_GIRO'){situH=`<span class="bdg br">⭕ sem giro</span>`;rowClass='obs';}
